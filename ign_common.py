@@ -10,100 +10,6 @@ import matplotlib.pyplot as plt
 from torchvision.utils import save_image
 import os
 
-# Create output directories
-os.makedirs('samples', exist_ok=True)
-os.makedirs('reconstructions', exist_ok=True)
-os.makedirs('checkpoints', exist_ok=True)
-
-class Encoder(nn.Module):
-    def __init__(self, in_channels=1):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=4, stride=2, padding=1)  # 28->14
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)          # 14->7
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1)         # 7->4
-        self.conv4 = nn.Conv2d(256, 512, kernel_size=4, stride=1, padding=0)         # 4->1
-        
-        self.bn1 = nn.BatchNorm2d(128)
-        self.bn2 = nn.BatchNorm2d(256)
-        
-        self.leaky_relu = nn.LeakyReLU(0.2, inplace=True)
-        
-        self.apply(self._init_weights)
-    
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv2d):
-            nn.init.normal_(m.weight, 0.0, 0.02)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.BatchNorm2d):
-            nn.init.normal_(m.weight, 1.0, 0.02)
-            nn.init.constant_(m.bias, 0)
-
-    def forward(self, x):
-        x = self.leaky_relu(self.conv1(x))
-        
-        x = self.conv2(x)
-        x = self.bn1(x)
-        x = self.leaky_relu(x)
-        
-        x = self.conv3(x)
-        x = self.bn2(x)
-        x = self.leaky_relu(x)
-        
-        x = self.conv4(x)
-        return x
-
-class Decoder(nn.Module):
-    def __init__(self, out_channels=1):
-        super().__init__()
-        self.convt1 = nn.ConvTranspose2d(512, 256, kernel_size=4, stride=1, padding=0)  # 1->4
-        self.convt2 = nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1)  # 4->7
-        self.convt3 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1)   # 7->14
-        self.convt4 = nn.ConvTranspose2d(64, out_channels, kernel_size=4, stride=2, padding=1)  # 14->28
-        
-        self.bn1 = nn.BatchNorm2d(256)
-        self.bn2 = nn.BatchNorm2d(128)
-        self.bn3 = nn.BatchNorm2d(64)
-        
-        self.relu = nn.ReLU(inplace=True)
-        self.tanh = nn.Tanh()
-        
-        self.apply(self._init_weights)
-    
-    def _init_weights(self, m):
-        if isinstance(m, nn.ConvTranspose2d):
-            nn.init.normal_(m.weight, 0.0, 0.02)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.BatchNorm2d):
-            nn.init.normal_(m.weight, 1.0, 0.02)
-            nn.init.constant_(m.bias, 0)
-
-    def forward(self, x):
-        x = self.convt1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        
-        x = self.convt2(x)
-        x = self.bn2(x)
-        x = self.relu(x)
-        
-        x = self.convt3(x)
-        x = self.bn3(x)
-        x = self.relu(x)
-        
-        x = self.convt4(x)
-        x = self.tanh(x)
-        return x
-
-class IGN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.encoder = Encoder()
-        self.decoder = Decoder()
-    
-    def forward(self, x):
-        return self.decoder(self.encoder(x))
     
 def sample_frequency_noise(real_batch):
     """Sample noise with frequency statistics of real data."""
@@ -216,10 +122,10 @@ def compute_validation_losses(model, model_copy, val_loader, device):
         val_losses[k] /= total_samples
     return val_losses
 
-def train_ign(model, train_loader, val_loader, device='cuda', total_iterations=1000):
+def train_ign(model, IGN_class, train_loader, val_loader, device='cuda', total_iterations=1000):
     """Train the IGN model."""
     model = model.to(device)
-    model_copy = IGN().to(device)
+    model_copy = IGN_class().to(device)
     
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs!")
@@ -308,41 +214,3 @@ def train_ign(model, train_loader, val_loader, device='cuda', total_iterations=1
     pbar.close()
     return losses, val_losses_history
 
-def main():
-    torch.manual_seed(42)
-    np.random.seed(42)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    
-    # For MNIST, keep original 28x28 size as per paper
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
-    
-    train_dataset = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
-    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, num_workers=8, pin_memory=True)
-    
-    val_dataset = datasets.MNIST(root='./data', train=False, transform=transform, download=True)
-    val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False, num_workers=8, pin_memory=True)
-    
-    model = IGN()
-    losses, val_losses = train_ign(model, train_loader, val_loader, device=device, total_iterations=3000)
-    
-    # Plot final loss curves
-    plt.figure(figsize=(10, 5))
-    for loss_name, values in losses.items():
-        if loss_name != 'total':  # Skip total loss for clarity
-            plt.plot(values, label=f'Train {loss_name}')
-    for loss_name, values in val_losses.items():
-        if loss_name != 'total':  # Skip total loss for clarity
-            plt.plot(values, label=f'Val {loss_name}')
-    plt.xlabel('Iteration')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.savefig('losses.png')
-    plt.close()
-
-if __name__ == '__main__':
-    main()

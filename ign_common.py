@@ -76,24 +76,24 @@ def generate_samples_with_iterations(model, val_loader, num_samples=8, num_itera
             
         return samples
 
-def compute_losses(model, model_copy, x, z, device):
+def compute_losses(model, model_copy, x, z, device, lambda_rec=20.0, lambda_idem=20.0, lambda_tight=2.5, tightness_clamp_ratio=1.5):
     """Compute all loss terms and return individually for monitoring."""
     # Reconstruction loss
     fx = model(x)
-    loss_rec = F.l1_loss(fx, x) * 20
+    loss_rec = F.l1_loss(fx, x) * lambda_rec
     
     # First application of f
     fz = model(z)
     
     # Idempotence loss uses model_copy for second application
     f_fz = model_copy(fz)
-    loss_idem = F.l1_loss(f_fz, fz) * 20
+    loss_idem = F.l1_loss(f_fz, fz) * lambda_idem
     
     # Tightness loss with frozen first application
     f_z = fz.detach()  # Detach to stop gradients
     ff_z = model(f_z)  # Use original model, not copy
     raw_tight_loss = -F.l1_loss(ff_z, f_z)
-    loss_tight = torch.tanh(raw_tight_loss / (1.5 * loss_rec.detach())) * (1.5 * loss_rec.detach()) * 2.5
+    loss_tight = torch.tanh(raw_tight_loss / (tightness_clamp_ratio * loss_rec.detach())) * (tightness_clamp_ratio * loss_rec.detach()) * lambda_tight
     
     total_loss = loss_rec + loss_idem + loss_tight
     
@@ -104,7 +104,7 @@ def compute_losses(model, model_copy, x, z, device):
         'tightness': loss_tight
     }
 
-def compute_validation_losses(model, model_copy, val_loader, device):
+def compute_validation_losses(model, model_copy, val_loader, device, lambda_rec=20.0, lambda_idem=20.0, lambda_tight=2.5, tightness_clamp_ratio=1.5):
     """Compute validation losses over the validation dataset."""
     model.eval()
     val_losses = {'reconstruction': 0.0, 'idempotence': 0.0, 'tightness': 0.0, 'total': 0.0}
@@ -114,7 +114,7 @@ def compute_validation_losses(model, model_copy, val_loader, device):
             x = batch[0].to(device)
             batch_size = x.size(0)
             z = sample_frequency_noise(x)
-            loss_dict = compute_losses(model, model_copy, x, z, device)
+            loss_dict = compute_losses(model, model_copy, x, z, device, lambda_rec, lambda_idem, lambda_tight, tightness_clamp_ratio)
             for k in val_losses.keys():
                 val_losses[k] += loss_dict[k].item() * batch_size
             total_samples += batch_size
@@ -122,7 +122,7 @@ def compute_validation_losses(model, model_copy, val_loader, device):
         val_losses[k] /= total_samples
     return val_losses
 
-def train_ign(model, IGN_class, train_loader, val_loader, device='cuda', total_iterations=1000):
+def train_ign(model, IGN_class, train_loader, val_loader, device='cuda', total_iterations=1000, lr=1e-4, lambda_rec=20.0, lambda_idem=20.0, lambda_tight=2.5, tightness_clamp_ratio=1.5):
     """Train the IGN model."""
     model = model.to(device)
     model_copy = IGN_class().to(device)
@@ -132,7 +132,7 @@ def train_ign(model, IGN_class, train_loader, val_loader, device='cuda', total_i
         model = nn.DataParallel(model)
         model_copy = nn.DataParallel(model_copy)
     
-    optimizer = optim.Adam(model.parameters(), lr=1e-4, betas=(0.5, 0.999))
+    optimizer = optim.Adam(model.parameters(), lr=lr, betas=(0.5, 0.999))
     
     # Track losses
     losses = {'reconstruction': [], 'idempotence': [], 'tightness': [], 'total': []}
@@ -152,7 +152,7 @@ def train_ign(model, IGN_class, train_loader, val_loader, device='cuda', total_i
             z = sample_frequency_noise(x)
             
             # Compute losses
-            loss_dict = compute_losses(model, model_copy, x, z, device)
+            loss_dict = compute_losses(model, model_copy, x, z, device, lambda_rec, lambda_idem, lambda_tight, tightness_clamp_ratio)
             
             # Optimize
             optimizer.zero_grad()
@@ -176,7 +176,7 @@ def train_ign(model, IGN_class, train_loader, val_loader, device='cuda', total_i
             
             # Compute and print validation losses every 100 iterations
             if iteration % 100 == 0 and iteration != 0:
-                val_losses = compute_validation_losses(model, model_copy, val_loader, device)
+                val_losses = compute_validation_losses(model, model_copy, val_loader, device, lambda_rec, lambda_idem, lambda_tight, tightness_clamp_ratio)
                 
                 # Log validation losses
                 for k, v in val_losses.items():
